@@ -41,17 +41,46 @@ func (t tailHost) RecordType() string {
 	return "A"
 }
 
+type arrayFlags []string
+
+func (i *arrayFlags) String() string {
+	return "flags"
+}
+
+func (i *arrayFlags) Set(value string) error {
+	*i = append(*i, value)
+	return nil
+}
+
+func sanitizeHost(s string) string {
+	return strings.Replace(s, " ", "-", -1)
+}
+
 func main() {
+	log.SetFlags(log.Lshortfile | log.LstdFlags)
 	dd := DNSDomain{}
 	var removeAll, removeUnused bool
+	var alias arrayFlags
 	flag.StringVar(&dd.Domain, "zone", "", "zone, ex. example.com")
 	flag.StringVar(&dd.Sub, "subdomain", "", "subdomain to use, e.g. 'wg' will make dns records as <tailscale host>.wg.example.com")
 	flag.BoolVar(&removeUnused, "remove-orphans", false, "remove DNS records that are not in tailscale")
 	flag.BoolVar(&removeAll, "remove-all", false, "remove all tailscale dns records")
+	flag.Var(&alias, "alias", "alias records")
 	flag.Parse()
 
+	aliasMap := make(map[string][]string, 0)
+	for _, a := range alias {
+		parts := strings.SplitN(a, "=", 2)
+		if len(parts) == 2 {
+			host := parts[0]
+			aliases := strings.Split(parts[1], ",")
+			if len(aliases) > 0 {
+				aliasMap[host] = aliases
+			}
+		}
+	}
+
 	ctx := context.Background()
-	log.SetFlags(log.Lshortfile | log.LstdFlags)
 	status, err := tailscale.Status(ctx)
 	if err != nil {
 		log.Fatal(err)
@@ -59,18 +88,31 @@ func main() {
 	hostList := make([]tailHost, 0, 1+len(status.Peer))
 	for _, ip := range status.Self.TailscaleIPs {
 		hostList = append(hostList, tailHost{
-			Name: status.Self.HostName,
+			Name: sanitizeHost(status.Self.HostName),
 			IP:   ip,
 		})
 	}
 	for _, peer := range status.Peer {
 		for _, ip := range peer.TailscaleIPs {
 			hostList = append(hostList, tailHost{
-				Name: peer.HostName,
+				Name: sanitizeHost(peer.HostName),
 				IP:   ip,
 			})
 		}
 	}
+
+	aliasList := make([]tailHost, 0)
+	for _, host := range hostList {
+		if aliases, ok := aliasMap[host.Name]; ok {
+			for _, a := range aliases {
+				aliasList = append(aliasList, tailHost{
+					Name: sanitizeHost(a),
+					IP:   host.IP,
+				})
+			}
+		}
+	}
+	hostList = append(hostList, aliasList...)
 
 	api, err := cloudflare.NewWithAPIToken(os.Getenv("CLOUDFLARE_API_TOKEN"))
 	if err != nil {
